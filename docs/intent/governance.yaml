@@ -299,7 +299,7 @@ risk:
 # SECRETS NEVER GO HERE. A command names the ENVIRONMENT VARIABLE holding the webhook URL or the bot
 # token; the value lives in the CI secret store. This file is committed and read by every fork.
 loop_notices:
-  enabled: false                # switch on once a channel below is wired to a secret
+  enabled: true                 # Slack bot channel wired to INTENT_SLACK_BOT_TOKEN; delivery not yet proven
   # Commands name the interpreter: an executable bit is lost by a commit from Windows or a zip
   # extraction, and a notifier that cannot start is a notice that never arrives.
   channels:
