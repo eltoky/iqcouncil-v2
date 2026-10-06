@@ -1,5 +1,6 @@
-digest=147e07207777
-synced_at=2026-10-04T18:39:10Z
+digest=2b4861e02ab9
+synced_at=2026-10-06T17:39:44Z
 project=eltoky-iqcouncil-v2
 mode=mcp
 rules=17
+rule_ids=intent-loop/follow-stages,intent-loop/review-not-tests,intent-loop/register-contract,intent-loop/neg-guard,intent-loop/guard-action,intent-loop/signals-upstream,intent-loop/graph-where-you-whether,intent-loop/local-first,intent-loop/h1-assisted-by,intent-loop/h2-inputs,intent-loop/h3-generated-share,intent-loop/h4-could-not-be-done,intent-loop/h5-human-certifies,intent-loop/bug-reproducer,intent-loop/signoff-recheck,intent-loop/escalation-human-only,intent-loop/model-routing
