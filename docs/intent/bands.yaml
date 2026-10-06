@@ -1,0 +1,16 @@
+# [DECLARED — no shipped script reads this file]
+# By design: intent-control-bands requires detection to be a version-controlled, unit-tested
+# script YOU write for YOUR metric. This is a template for that script's config, not an input
+# to anything in the suite. See docs/ENFORCEMENT_MAP.md.
+# docs/intent/bands.yaml — version-controlled, reviewed like code.
+# Start with ONE metric that has a stable rolling baseline.
+metric: ci_test_failure_rate
+baseline: rolling_30d
+rules: western_electric          # catches slow drift, not only spikes
+tiers:
+  1sigma: { action: log }
+  2sigma: { action: diagnose, tools: "Read,Grep,Bash(gh run view *)" }
+  3sigma: { action: propose, routes: [pull_request, runbook:rollback-deploy] }
+triage:
+  owner: TBD                     # service owner or on-call; never leave unnamed in production
+  dismissal_requires_reason: true

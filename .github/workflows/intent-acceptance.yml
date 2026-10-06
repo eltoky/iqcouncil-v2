@@ -1,0 +1,341 @@
+# .github/workflows/intent-acceptance.yml — the acceptance GATE.
+# Triggered by workflow_run, so GitHub runs THIS file from the default branch with a write token —
+# for same-repository and fork PRs alike. Security rules it follows:
+#   * it executes only protected-branch code (./trusted); the PR is checked out separately as DATA
+#     (./pr, symlinks disabled) and nothing from it is run;
+#   * PR identity comes from GitHub's own payload and API, and is bound to the exact head commit;
+#   * untrusted strings (branch names, titles) reach shell only through environment variables.
+# Branch protection: require the COMMIT STATUS "intent/acceptance". It is set only by this job.
+name: intent-acceptance
+on:
+  workflow_run:
+    workflows: [intent-acceptance-trigger]
+    types: [completed]
+  push:
+    branches: [main]
+permissions: {}
+jobs:
+  gate:
+    if: github.event_name == 'workflow_run'
+    runs-on: ubuntu-latest
+    permissions: { contents: write, pull-requests: write, statuses: write, actions: read }
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+      HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+      HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
+      # Fully qualified: a TAG named origin/main would otherwise shadow the remote ref (2.0.0 review).
+      INTENT_TRUST_REF: refs/remotes/origin/main
+      # Where the protected-branch checkout lives. Programs named by policy (the forge adapter,
+      # the notifier) resolve against THIS, never the PR checkout the gate runs inside: the
+      # documented adapter form is a relative path, and relative to the PR tree it was the PR's code.
+      INTENT_TRUSTED_ROOT: ${{ github.workspace }}/trusted
+    steps:
+      - name: Trusted code — the protected branch only
+        uses: actions/checkout@v4
+        with: { path: trusted, fetch-depth: 0, persist-credentials: false }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install pyyaml cryptography
+      - name: PR number handed over by a decision comment (untrusted — used only as a lookup key)
+        if: github.event.workflow_run.event == 'issue_comment'
+        uses: actions/download-artifact@v4
+        with:
+          name: pr-number
+          path: handover
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+      - name: Resolve the PR — identity from GitHub's API, bound to the exact head commit
+        id: pr
+        env: { TRIGGER_EVENT: "${{ github.event.workflow_run.event }}" }
+        run: |
+          if [ "$TRIGGER_EVENT" = "issue_comment" ]; then
+            n=$(head -c 12 handover/number | tr -cd '0-9')
+            [ -n "$n" ] || { echo "no valid PR number handed over"; exit 0; }
+            [ "$(gh api "repos/$REPO/pulls/$n" --jq .state)" = "open" ] || { echo "PR $n is not open"; exit 0; }
+          else
+            owner="${HEAD_REPO%%/*}"
+            n=$(gh api "repos/$REPO/pulls?state=open&head=$owner:$HEAD_BRANCH" --jq '.[0].number // empty')
+            [ -n "$n" ] || { echo "no open PR for $owner:$HEAD_BRANCH"; exit 0; }
+          fi
+          pr_sha=$(gh api "repos/$REPO/pulls/$n" --jq .head.sha)
+          pr_ref=$(gh api "repos/$REPO/pulls/$n" --jq .head.ref)
+          pr_repo=$(gh api "repos/$REPO/pulls/$n" --jq .head.repo.full_name)
+          if [ "$TRIGGER_EVENT" != "issue_comment" ] && [ "$pr_sha" != "$HEAD_SHA" ]; then
+            echo "PR moved on ($pr_sha); a newer run will decide"; exit 0
+          fi
+          if [ "$pr_repo" = "$REPO" ]; then fork=false; else fork=true; fi
+          { echo "number=$n"; echo "fork=$fork"; } >> "$GITHUB_OUTPUT"
+          { echo "PR_SHA=$pr_sha"; echo "PR_BRANCH=$pr_ref"; } >> "$GITHUB_ENV"
+      - name: Resolve the acceptance mode, refusing any this release does not implement
+        id: mode
+        # Every mode named here must be honoured by the steps below. `unattended` once was not —
+        # it was documented with eligibility limits that no code read, so it behaved exactly like
+        # after_signoff while the config claimed CI would merge. A mode that cannot be honoured
+        # must say so in seconds rather than look like a stuck check.
+        if: steps.pr.outputs.number != ''
+        env: { PR: "${{ steps.pr.outputs.number }}" }
+        run: |
+          # ONE reader of policy: autonomy.py, through govcfg, from the trusted checkout. This used
+          # to be three inline yaml.safe_load calls, and none of them knew that YAML reads an
+          # unquoted `off` as the boolean False — so `auto_merge: off` written by hand printed
+          # "False" and failed every PR as a configuration error. autonomy.py normalises it.
+          res=$(cd trusted && python3 .claude/intent-hooks/autonomy.py resolve --json 2>/dev/null) || true
+          mode=$(printf '%s' "$res" | python3 -c "import json,sys
+          try: print(json.load(sys.stdin).get('auto_merge') or '')
+          except Exception: print('')")
+          owner=$(printf '%s' "$res" | python3 -c "import json,sys
+          try: print(json.load(sys.stdin).get('policy_owner') or '')
+          except Exception: print('')")
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "owner=$owner" >> "$GITHUB_OUTPUT"
+          case "$mode" in
+            off|after_signoff|unattended) echo "acceptance mode: $mode" ;;
+            *)
+              gh api "repos/$REPO/statuses/$PR_SHA" -f state=failure -f context="intent/acceptance" \
+                -f description="governance.yaml: auto_merge '$mode' is not implemented in this release" >/dev/null
+              { echo "### intent/acceptance: CONFIGURATION ERROR"
+                echo
+                echo "\`docs/intent/governance.yaml\` sets \`merge.auto_merge: $mode\`, which **this release does not implement**."
+                echo "Supported values are \`off\`, \`after_signoff\` and \`unattended\`."
+                echo
+                echo "This is failing rather than waiting, because an unimplemented mode otherwise looks"
+                echo "like a stuck \"awaiting sign-off\" check while the configuration claims CI will merge."
+                echo
+                echo "Set \`after_signoff\` (a human approves, the loop re-checks, then it merges) or \`off\`"
+                echo "(a human merges by hand after the gate passes)."; } > mode.md
+              gh pr comment "$PR" --repo "$REPO" --body-file mode.md
+              exit 1 ;;
+          esac
+      - name: PR as DATA — separate worktree, symlinks disabled, nothing executed from it
+        if: steps.pr.outputs.number != ''
+        env: { PR: "${{ steps.pr.outputs.number }}" }
+        run: |
+          cd trusted
+          # A PRIVATE repository needs credentials for this fetch: the trusted checkout uses
+          # persist-credentials: false, so without them git prompts and the job dies with
+          # "could not read Username for 'https://github.com'".
+          #
+          # The token goes in a PER-COMMAND, HOST-SCOPED header and is never written to
+          # .git/config. That is deliberate, not fussiness: `git worktree add` makes ../pr SHARE
+          # trusted/.git/config, so a token placed in the remote URL is readable from the worktree
+          # that holds UNTRUSTED PR content (`git config --get remote.origin.url` prints it).
+          # Authenticating this way keeps the token out of every file the PR tree can reach.
+          AUTH=$(printf '%s' "x-access-token:${GH_TOKEN}" | base64 -w0)
+          echo "::add-mask::$AUTH"            # GitHub masks the token, not its base64 encoding
+          export GIT_TERMINAL_PROMPT=0        # fail with a clear error rather than prompting
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $AUTH" \
+              fetch -q --no-recurse-submodules origin "pull/$PR/head:refs/pr/$PR"
+          # The commit evaluated MUST be the commit the status is posted on and the merge is pinned to.
+          # PR_SHA came from the API a moment ago; a force-push in between would otherwise let an
+          # approved commit be evaluated while the status and the merge land on another.
+          got=$(git rev-parse "refs/pr/$PR")
+          if [ "$got" != "$PR_SHA" ]; then
+            echo "::error::the pull request moved during the run ($PR_SHA -> $got); re-run on the new head"
+            exit 1
+          fi
+          git -c core.symlinks=false worktree add -q ../pr "refs/pr/$PR"
+          git -C ../pr config core.symlinks false
+      - name: Records are append-only within this PR
+        if: steps.pr.outputs.number != ''
+        id: records
+        # a failure here must not skip the steps below: the status and the explanation still have to be posted
+        continue-on-error: true
+        working-directory: pr
+        run: |
+          set -o pipefail
+          python3 ../trusted/.claude/intent-hooks/intent_escalate.py log-verify --range "refs/remotes/origin/main..HEAD" 2>&1 | tee ../records.out
+      - name: Re-check the decision with TRUSTED code
+        if: steps.pr.outputs.number != ''
+        id: recheck
+        working-directory: pr
+        env: { PR: "${{ steps.pr.outputs.number }}", FORK: "${{ steps.pr.outputs.fork }}" }
+        run: |
+          set +e
+          change="${PR_BRANCH#change/}"
+          # Reports are keyed by CHANGE ID (the loop writes them before a pull request exists);
+          # a report keyed by the PR number is still read when no change-keyed one is present.
+          rep(){ f="docs/intent/reports/$1_$change.md"; [ -f "$f" ] || f="docs/intent/reports/$1_$PR.md"; printf '%s' "$f"; }
+          extra=()
+          # Fork PRs: an override cannot be attributed to a team member, so none counts. The escalation is
+          # still opened (in this scratch worktree) so its request code can be posted on the PR.
+          if [ "$FORK" = "true" ]; then extra+=(--no-override); fi
+          git diff --name-only --no-renames "refs/remotes/origin/main...HEAD" > ../changed.txt 2>/dev/null || : > ../changed.txt
+          python3 ../trusted/.claude/intent-hooks/recheck_signoff.py --change "$change" --pr "$PR" \
+            --ledger "$(rep FIX_LEDGER)" --report "$(rep PR_INTENT)" \
+            --changed-files ../changed.txt \
+            "${extra[@]}" > ../recheck.out 2>&1
+          rc=$?                       # capture once: any later command resets it
+          cat ../recheck.out
+          echo "code=$rc" >> "$GITHUB_OUTPUT"
+      - name: Unattended eligibility (only reached when the protected config says unattended)
+        id: elig
+        if: steps.pr.outputs.number != '' && steps.mode.outputs.mode == 'unattended'
+        continue-on-error: true
+        working-directory: pr
+        env: { PR: "${{ steps.pr.outputs.number }}", FORK: "${{ steps.pr.outputs.fork }}" }
+        run: |
+          set +e
+          change="${PR_BRANCH#change/}"
+          # Reports are keyed by CHANGE ID (the loop writes them before a pull request exists);
+          # a report keyed by the PR number is still read when no change-keyed one is present.
+          rep(){ f="docs/intent/reports/$1_$change.md"; [ -f "$f" ] || f="docs/intent/reports/$1_$PR.md"; printf '%s' "$f"; }
+          # Inputs are gathered HERE, with the token, and handed to the evaluator explicitly, so the
+          # evaluator stays pure and testable offline. Anything it cannot be told, it refuses.
+          gh pr view "$PR" --repo "$REPO" --json additions,deletions > ../pr.json 2>/dev/null
+          merged=$(gh pr list --repo "$REPO" --state merged --head "change/$change" --json number --jq 'length' 2>/dev/null)
+          [ -n "$merged" ] || merged=""
+          git diff --name-only --no-renames "refs/remotes/origin/main...HEAD" > ../changed.txt 2>/dev/null || : > ../changed.txt
+          graph=no; [ -d docs/intent/graph ] && graph=yes
+          # A fork PR can never merge unattended: the eligibility inputs come from a tree the
+          # contributor controls, and nobody on the team is accountable for it.
+          if [ "$FORK" = "true" ]; then
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            echo "[eligibility] INELIGIBLE — fork PRs never merge unattended" | tee ../elig.out
+            exit 0
+          fi
+          python3 ../trusted/.claude/intent-hooks/unattended_eligibility.py \
+            --change "$change" --pr "$PR" --pr-json ../pr.json \
+            --report "$(rep PR_INTENT)" \
+            --ledger "$(rep FIX_LEDGER)" \
+            --changed-files ../changed.txt ${merged:+--merged-prs "$merged"} \
+            --graph "$graph" > ../elig.out 2>&1
+          rc=$?
+          cat ../elig.out
+          if [ "$rc" = 0 ]; then echo "eligible=true" >> "$GITHUB_OUTPUT"; else echo "eligible=false" >> "$GITHUB_OUTPUT"; fi
+      - name: Unattended re-check (no approval expected; every other check still applies)
+        id: urecheck
+        if: steps.pr.outputs.number != '' && steps.mode.outputs.mode == 'unattended' && steps.elig.outputs.eligible == 'true'
+        continue-on-error: true
+        working-directory: pr
+        env: { PR: "${{ steps.pr.outputs.number }}" }
+        run: |
+          set +e
+          change="${PR_BRANCH#change/}"
+          # Reports are keyed by CHANGE ID (the loop writes them before a pull request exists);
+          # a report keyed by the PR number is still read when no change-keyed one is present.
+          rep(){ f="docs/intent/reports/$1_$change.md"; [ -f "$f" ] || f="docs/intent/reports/$1_$PR.md"; printf '%s' "$f"; }
+          # --changed-files is REQUIRED on this path. The coverage gate reports UNCHECKED
+          # without it, and under an autonomous mode that is blocking: auto-merging a change
+          # when nothing can say which languages it touched is the failure this gate exists for.
+          # `../changed.txt` was written by the eligibility step above.
+          [ -f ../changed.txt ] || git diff --name-only --no-renames "refs/remotes/origin/main...HEAD" > ../changed.txt 2>/dev/null || : > ../changed.txt
+          python3 ../trusted/.claude/intent-hooks/recheck_signoff.py --change "$change" --pr "$PR" \
+            --ledger "$(rep FIX_LEDGER)" \
+            --report "$(rep PR_INTENT)" \
+            --changed-files ../changed.txt --unattended > ../urecheck.out 2>&1
+          rc=$?
+          cat ../urecheck.out
+          echo "code=$rc" >> "$GITHUB_OUTPUT"
+      - name: Persist escalation records (same-repository PRs only; distinct files never conflict)
+        if: steps.pr.outputs.number != '' && steps.pr.outputs.fork == 'false'
+        working-directory: pr
+        run: |
+          git config user.name "intent-acceptance[bot]"; git config user.email "intent-acceptance@users.noreply.github.com"
+          git add -A docs/intent/governance
+          git diff --cached --quiet || git commit -qm "escalation: records from CI run $GITHUB_RUN_ID"
+          [ "$(git rev-list --count "refs/pr/${{ steps.pr.outputs.number }}..HEAD")" = "0" ] && exit 0
+          # Same per-command header as the fetch above, for the same reason: this step runs INSIDE
+          # the PR worktree, whose .git/config is shared with trusted/. Writing the token into the
+          # remote URL here would leave it readable from the untrusted tree for the rest of the job.
+          AUTH=$(printf '%s' "x-access-token:${GH_TOKEN}" | base64 -w0)
+          echo "::add-mask::$AUTH"
+          export GIT_TERMINAL_PROMPT=0
+          HDR="http.https://github.com/.extraheader=AUTHORIZATION: basic $AUTH"
+          for i in 1 2 3 4 5; do     # detached worktree: fetch + rebase explicitly rather than pull
+            git -c "$HDR" fetch -q --no-recurse-submodules origin "$PR_BRANCH" \
+              && git rebase -q FETCH_HEAD \
+              && git -c "$HDR" push -q origin "HEAD:$PR_BRANCH" && exit 0
+            sleep $((i * 2))
+          done
+          exit 1
+      - name: Report — commit status on the PR head, and the request code if escalated
+        if: always() && steps.pr.outputs.number != ''
+        env:
+          PR: ${{ steps.pr.outputs.number }}
+          OK: ${{ steps.records.outcome == 'success' && (steps.recheck.outputs.code == '0' || (steps.mode.outputs.mode == 'unattended' && steps.elig.outputs.eligible == 'true' && steps.urecheck.outputs.code == '0')) }}
+          MODE: ${{ steps.mode.outputs.mode }}
+          ELIGIBLE: ${{ steps.elig.outputs.eligible }}
+          RECORDS: ${{ steps.records.outcome }}
+          CODE: ${{ steps.recheck.outputs.code }}
+        run: |
+          if [ "$OK" = "true" ] && [ "$MODE" = "unattended" ] && [ "$ELIGIBLE" = "true" ]; then
+            state=success; desc="unattended: eligible, validation holds"
+          elif [ "$OK" = "true" ]; then state=success; desc="decision holds"
+          elif [ "$RECORDS" = "success" ] && [ "$CODE" = "4" ]; then state=pending; desc="awaiting human sign-off"
+          else state=failure; desc="blocked — see the PR comment"; fi
+          gh api "repos/$REPO/statuses/$PR_SHA" -f state="$state" -f context="intent/acceptance" -f description="$desc" >/dev/null
+          if [ "$state" = "failure" ]; then
+            code=$(grep -m1 '^ESCQ\.' recheck.out || true)
+            { echo "### intent/acceptance: BLOCKED"; echo; echo '```'; { cat records.out 2>/dev/null | grep -E 'GOVERNANCE|DELETED|MODIFIED|CHANGED'; grep -E 'DECISION|AWAITING|^  [A-Z-]+:' recheck.out; } | head -24; echo '```'
+              if [ -n "$code" ]; then
+                echo; echo "**Requester:** send this code to an approver in the escalation chain:"; echo; echo '```'; echo "$code"; echo '```'
+                echo "**Approver:** after reviewing this exact commit, post your \`ESCR.…\` code as a comment here, or send it back to the requester."
+              fi; } > body.md
+            gh pr comment "$PR" --repo "$REPO" --body-file body.md
+          fi
+      - name: Merge per mode
+        if: >-
+          steps.pr.outputs.number != '' && steps.records.outcome == 'success' &&
+          (steps.recheck.outputs.code == '0' ||
+           (steps.mode.outputs.mode == 'unattended' && steps.elig.outputs.eligible == 'true' &&
+            steps.urecheck.outputs.code == '0'))
+        env:
+          PR: "${{ steps.pr.outputs.number }}"
+          MODE: "${{ steps.mode.outputs.mode }}"
+          OWNER: "${{ steps.mode.outputs.owner }}"
+          HUMAN_HELD: "${{ steps.recheck.outputs.code == '0' }}"
+        run: |
+          # Which path ADMITTED this merge decides the record, not the configured mode. Under
+          # `unattended`, a PR a human approved — but that was not eligible — reached this step on
+          # the human path and used to be written up as "no human approved this change". The audit
+          # record must say what actually happened.
+          path="$MODE"
+          if [ "$MODE" = unattended ] && [ "$HUMAN_HELD" = true ]; then path=after_signoff; fi
+          case "$path" in
+            off) echo "Decision holds. Mode 'off': a human merges by hand." ;;
+            after_signoff) gh pr merge "$PR" --repo "$REPO" --squash --auto --match-head-commit "$PR_SHA" ;;
+            unattended)
+              # Reached only via eligibility + the unattended re-check, with no human decision
+              # holding. CI performs the merge under its own identity, never the interactive agent,
+              # and the policy owner is recorded so the accountable human is in git history.
+              owner="$OWNER"
+              if [ -z "$owner" ]; then echo "no policy_owner; refusing to merge"; exit 1; fi
+              title=$(gh pr view "$PR" --repo "$REPO" --json title --jq .title)
+              {
+                echo "Merged unattended: no human approved this change."
+                echo "Accountable policy owner: $owner (certified the policy, not this change)."
+                echo "Eligibility and validation: docs/intent/reports/RECHECK_*.md and run $GITHUB_RUN_ID."
+                echo "Hard rule H5 is deliberately relaxed for this merge."
+              } > merge_body.txt
+              gh pr merge "$PR" --repo "$REPO" --squash --auto --match-head-commit "$PR_SHA" \
+                --subject "$title (#$PR)" --body-file merge_body.txt
+              {
+                echo "### intent/acceptance: MERGED UNATTENDED"
+                echo
+                echo "No human approved this change. It met every eligibility fence in \`merge.unattended\`"
+                echo "and the validation re-check held on the head commit."
+                echo
+                echo "**Accountable:** $owner — as policy owner, not as a reviewer of this change."
+              } > merge_note.md
+              gh pr comment "$PR" --repo "$REPO" --body-file merge_note.md ;;
+            *) echo "mode '$mode' is not implemented; refusing to merge"; exit 1 ;;
+          esac
+
+  # On main: prove nothing recorded was ever altered, and publish the chained export as an artifact.
+  # READ-ONLY — nothing is pushed to main, so branch protection can forbid all direct pushes.
+  history:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions: { contents: read }
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0, persist-credentials: false }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install pyyaml cryptography
+      - run: python3 .claude/intent-hooks/intent_escalate.py log-verify
+      - run: python3 .claude/intent-hooks/intent_escalate.py log-render --out escalations-export.jsonl
+      - uses: actions/upload-artifact@v4
+        with: { name: escalations-export, path: escalations-export.jsonl }

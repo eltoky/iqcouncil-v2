@@ -1,0 +1,42 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/intent-hooks/session_status.sh"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .claude/intent-hooks/pretooluse_intent.py"
+          },
+          {
+            "type": "command",
+            "command": "python3 .claude/intent-hooks/pretooluse_provenance.py"
+          },
+          {
+            "type": "command",
+            "command": "python3 .claude/intent-hooks/pretooluse_model_route.py"
+          }
+        ]
+      },
+      {
+        "matcher": "Task|Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .claude/intent-hooks/pretooluse_model_route.py"
+          }
+        ]
+      }
+    ]
+  }
+}

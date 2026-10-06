@@ -1,0 +1,29 @@
+# .github/workflows/intent-acceptance-trigger.yml — UNPRIVILEGED. Its only job is to exist, so that
+# intent-acceptance.yml (which runs from the default branch, trusted) is triggered by workflow_run.
+# A PR can edit this file; that gains it nothing — the gate decides nothing from here, and if the
+# trigger never fires, the required status is never set and the PR cannot merge (fail-closed).
+name: intent-acceptance-trigger
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  pull_request_review:
+    types: [submitted, dismissed]
+  issue_comment:
+    types: [created]          # an approver posted a decision code on the PR
+permissions: {}
+jobs:
+  trigger:
+    # comments only matter when they carry a decision code
+    if: github.event_name != 'issue_comment' || (github.event.issue.pull_request && contains(github.event.comment.body, 'ESCR.'))
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "intent acceptance will run from the default branch"
+      # Comment events run on the default branch, so the gate cannot tell which PR they belong to.
+      # Hand it the PR number; the gate treats it as a lookup key only and takes everything else
+      # (head commit, branch, repository) from GitHub's API.
+      - if: github.event_name == 'issue_comment'
+        env: { N: "${{ github.event.issue.number }}" }
+        run: mkdir -p pr && printf '%s\n' "$N" > pr/number
+      - if: github.event_name == 'issue_comment'
+        uses: actions/upload-artifact@v4
+        with: { name: pr-number, path: pr/number, retention-days: 1 }
