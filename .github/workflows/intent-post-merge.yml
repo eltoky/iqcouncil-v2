@@ -1,0 +1,66 @@
+# .github/workflows/intent-post-merge.yml — the POST-MERGE ACTOR. Installed by intent-init.
+#
+# After a change merges, the loop has work nobody used to trigger: release the change's locks,
+# assemble its register fragment (provisional ids promoted to permanent ones — scripted, under a
+# lease, so two merges can never allocate the same id), and hand the archive stage to an agent.
+#
+# Trust: `pull_request_target` with `closed` runs THIS file from the default branch, never the PR's
+# copy, and the job checks out the default branch — the merged result — not the PR head. The PR's
+# only inputs are its number, its branch NAME (for the change id) and its merge commit, and the
+# driver verifies that commit is reachable from the protected branch before it records anything.
+#
+# Pushing the assembly needs `contents: write` AND a branch-protection rule that lets this workflow
+# push to the default branch. Without that the push is refused (exit 6) and the assembly is opened
+# as a pull request instead, which — being a register write — then waits for a human. That is the
+# fail-closed direction, and it is reported, not hidden.
+name: intent-post-merge
+on:
+  pull_request_target:
+    types: [closed]
+permissions:
+  contents: write
+  pull-requests: write
+# NO workflow concurrency group: GitHub keeps only ONE pending run per group and cancels the rest,
+# so a burst of merges would silently skip assemblies. Serialisation is the driver's lease on
+# `register-assembly`; a run that loses the race undoes its commit and retries below.
+jobs:
+  post-merge:
+    if: github.event.pull_request.merged == true && startsWith(github.event.pull_request.head.ref, 'change/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: "${{ github.event.repository.default_branch }}", fetch-depth: 0 }
+      - name: Identity for the assembly commit
+        run: |
+          git config user.name  "intent-loop"
+          git config user.email "intent-loop@users.noreply.github.com"
+      - name: Post-merge actor
+        id: actor
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          INTENT_AGENT_ID: intent-post-merge
+        run: |
+          change="${HEAD_REF#change/}"
+          echo "change=$change" >> "$GITHUB_OUTPUT"
+          git fetch -q origin '+refs/intent/*:refs/intent/*' '+refs/intent-locks/*:refs/intent-locks/*' || true
+          set +e
+          for attempt in 1 2 3 4 5 6; do
+            git pull -q --ff-only origin "${{ github.event.repository.default_branch }}"
+            python3 .claude/intent-hooks/intent_loop.py post-merge "$change" --merge-commit "$MERGE_SHA" --push
+            rc=$?
+            [ "$rc" = 3 ] || break            # 3 = lost a race (another merge assembled first): retry
+            sleep $(( attempt * 5 ))
+          done
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          # 6 = the push was refused: hand the assembly to a person as a pull request below.
+          [ "$rc" = 0 ] || [ "$rc" = 6 ]
+      - name: Branch protection refused the assembly — open it as a pull request
+        if: steps.actor.outputs.rc == '6'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANGE: ${{ steps.actor.outputs.change }}
+        run: |
+          git push -q origin "HEAD:refs/heads/archive/$CHANGE"
+          gh pr create --head "archive/$CHANGE" --title "Assemble register fragment: $CHANGE" \
+            --body "The post-merge actor assembled this change's register fragment but could not push it to the default branch. The diff is the deterministic assembly of a fragment already reviewed in the merged change."

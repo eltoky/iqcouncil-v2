@@ -1,0 +1,5 @@
+*.key
+.intent/
+capability.json
+docs/intent/capability.json
+*.bak-*

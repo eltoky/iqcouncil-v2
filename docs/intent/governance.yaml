@@ -1,0 +1,330 @@
+# docs/intent/governance.yaml — who decides, what gets re-checked, and how disagreements escalate.
+# Reviewed like code: a change to this file is a configuration change and triggers the eval suite.
+
+forge:
+  # Which code-hosting service answers the three questions the loop cannot answer from git alone:
+  # the facts of a request (head, size, commits, approvals, checks), how many requests for this
+  # change already merged, and what people said on it. Everything else in the loop works on plain
+  # git, which is why only this section is forge-specific.
+  #
+  # name      free text, recorded in the audit trail. github · gitlab · azure-devops · bitbucket ·
+  #           gerrit · bare-git · anything you like.
+  # adapter   a program that prints a facts document and exits 0. Leave EMPTY to use the built-in
+  #           GitHub backend. Any other forge is supported by writing one of these — the contract
+  #           is one JSON shape, documented in the developer handbook, and `forge.py validate`
+  #           checks an adapter's output mechanically.
+  #
+  # With no adapter and no GitHub CLI, every forge-derived fact is UNKNOWN. That is not a failure
+  # mode to work around: every consumer is fail-closed, so unknown means block.
+  name: github
+  adapter: ""
+
+autonomy:
+  # WHERE THE HUMAN STANDS. One named declaration, so this is a thing a team can discuss, review
+  # and revoke — `merge.auto_merge` below says how a merge happens and nothing about who is
+  # accountable for it being unattended.
+  #
+  #   hitl   HUMAN IN THE LOOP.  A human approves every change before it merges. The loop prepares
+  #          the decision; it does not take it. Requires auto_merge: off or after_signoff.
+  #   hotl   HUMAN ON THE LOOP.  The loop decides and merges eligible changes; a named human is
+  #          TOLD each time and can intervene, and the human_in_loop_for classes below still stop
+  #          and wait. Review is by exception, after the fact. Requires auto_merge: unattended,
+  #          a policy_owner, a review_by date, and notify.channel.
+  #   hootl  HUMAN OUT OF THE LOOP.  As hotl, but nobody is told per change — the human reads the
+  #          ledger on a cadence. Requires everything hotl does except the channel, plus
+  #          acknowledged_by: somebody accepting, by name, that no human sees the happy path.
+  #
+  # Every failure resolves to hitl, loudly, and never to the more permissive reading:
+  #   · an unknown or misspelled mode                      · a lapsed or missing review_by
+  #   · a mode that disagrees with merge.auto_merge         · hotl with no notify.channel
+  #   · a placeholder or absent policy_owner               · hootl with no acknowledged_by
+  # It is also read from the TRUST REF, so a branch cannot grant itself autonomy.
+  #
+  # No mode waives model_routing.human_in_loop_for. hootl does not mean "no human ever": those
+  # classes become ineligible for autonomous merge and queue for a person.
+  mode: hitl
+
+  # MANDATORY for hotl and hootl. The grant lapses on this date and the repository reverts to
+  # hitl until somebody re-agrees it. An autonomy grant with no end date is how a two-week
+  # experiment becomes permanent policy that nobody remembers agreeing to.
+  review_by: ""                    # YYYY-MM-DD
+
+  notify:
+    # MANDATORY for hotl, and the only thing that distinguishes being ON the loop from being OUT
+    # of it. With no channel, "a human is watching" is a false claim, so the mode drops to hitl
+    # rather than quietly running as hootl under a reassuring label.
+    channel: ""                    # e.g. "slack:#eng-governance" · "email:eng@acme.io"
+
+    # ALSO MANDATORY for hotl: the program that actually delivers the notice. A channel with
+    # nothing to deliver to it is a label, and a label is what the suite used to accept.
+    #
+    # THE NOTICE GOES OUT BEFORE THE MERGE, AND A FAILED DELIVERY BLOCKS THE MERGE. Notifying
+    # afterwards would give nobody the chance to intervene, which is the entire content of being
+    # "on" the loop. So the cost is explicit: when this path is down, hotl repositories stop
+    # merging. If you would rather keep merging unwatched, you are describing hootl — declare
+    # hootl, where no notice is required and nobody pretends otherwise.
+    #
+    # The contract is `intent-notice/1`: the program reads a JSON payload on stdin, delivers it,
+    # prints ONE line that an operator can follow back to the delivered message, and exits 0.
+    # Exit 0 with no output is NOT delivery — a notifier that returns nothing has not been shown
+    # to have sent anything, which is the same mistake as proving a hook works from an exit code
+    # a missing interpreter also returns. Two working implementations ship in
+    # intent-escalation/assets/notifiers/ (a file one and a webhook one); `notify.py check`
+    # delivers a test notice right now.
+    #
+    # Read from the TRUST REF only, because this is a program the privileged step runs. Nothing
+    # from the request — title, branch, body — is ever placed in its argv.
+    # Keep credentials OUT of here: this file is committed. The webhook notifier takes the NAME
+    # of an environment variable and reads the URL from the CI secret store.
+    # This is a COMMAND LINE, not a path: it is split the way a shell would split it, so quote
+    # any path containing a space — "/opt/My Tools/notify.py" --flag.
+    command: ""                    # e.g. "./notifiers/webhook_notifier.py --url-env SLACK_HOOK"
+    timeout_seconds: 20            # no answer in time is a failed delivery, so a merge blocks
+    receipts: docs/intent/governance/notices   # one file per notice; an AUDIT trail, never a
+                                   # permission — the gate always delivers afresh and never
+                                   # accepts a receipt found in the working tree as proof
+
+  # MANDATORY for hootl. A real identity, as 'Name <email>'.
+  acknowledged_by: ""
+
+merge:
+  # off           — a human merges by hand after the gate passes
+  # after_signoff — a human signs off; the loop re-checks; if the re-check holds, it merges itself
+  # unattended    — eligible changes merge with NO human approval. This deliberately relaxes hard
+  #                 rule H5: the accountable human becomes the policy_owner below, who certified
+  #                 the POLICY rather than the change. Everything it needs is checked by
+  #                 unattended_eligibility.py, and every unknown is a NO.
+  #
+  # intent-init derives this from how the team actually works (scripts/merge_profile.py) rather
+  # than leaving a default in place; the gate refuses any value it does not implement.
+  auto_merge: "off"
+
+  # [DECLARED — no code reads this] A record of what you believe branch protection does, so
+  # "we thought it was enforced" is a written claim rather than an assumption. NOTHING compares it
+  # with GitHub's actual required-check list; see docs/ENFORCEMENT_MAP.md, Known gaps.
+  #   required — intent/acceptance is in branch protection and blocks merges
+  #   advisory — the gate reports only; a human merges. Correct for a solo repository, because a
+  #              required check with no second approver deadlocks every merge.
+  enforcement: advisory
+
+  unattended:
+    # REQUIRED for auto_merge: unattended. A real identity — the template placeholder is refused,
+    # because an unattended merge with nobody accountable is not a merge this suite makes.
+    policy_owner: ""                 # e.g. "Ada Lovelace <ada@acme.io>"
+    max_generated_share: 40          # % from the PR's H3 field; unparseable means INELIGIBLE
+    max_changed_lines: 200           # additions + deletions
+    # Classes that never merge unattended. Each is detected from an artifact the loop already
+    # produces; if a class cannot be RULED OUT, the change is ineligible rather than assumed safe.
+    never_for: [neg_claims, security_findings, first_pr_of_change, hub_nodes, arch_contract_changes]
+    arch_contract_paths: ["docs/architecture/**", "*.drawio", "openspec/specs/**", "docs/adr/**"]
+    # Not configurable, by design: fork PRs never merge unattended (the eligibility inputs come
+    # from a tree the contributor controls), and hub_nodes requires a code graph — without one,
+    # blast radius cannot be judged and the change is ineligible.
+
+signoff_recheck:
+  # enabled: false switches off SCRUTINY of a sign-off. It does NOT waive the sign-off: with no
+  # approval the verdict is still AWAITING SIGN-OFF. (Before 1.4.1 it returned "holds" with no
+  # approval at all, which made this flag an unfenced merge bypass.)
+  enabled: true                 # re-run validation AFTER a human signs off, on the exact signed commit
+  on_fail: escalate             # block | escalate
+  # rubber-stamp signals — each one alone escalates; they detect an approval that could not have been a review
+  rubber_stamp:
+    min_seconds_per_100_lines: 60    # approving 1,000 lines in 20 seconds is not a review
+    approved_with_open_blockers: true
+    approved_before_checks_finished: true
+    approved_stale_commit: true      # the approval is on an older commit than the one being merged
+
+escalation:
+  enabled: true
+  allow_local_override: false   # true = the local user may bypass an escalation (always logged as FORCE)
+  override_requires_reason: true
+  code_ttl_minutes: 120         # a release code expires; it is also bound to one change and one commit
+  log: docs/intent/governance/ESCALATIONS.log
+  chain:                        # tried in order; any listed approver's valid code releases the escalation
+    - id: lead
+      name: "Team lead"
+      contact: "lead@example.com"
+      pubkey: "REPLACE with: intent_escalate.py keygen --out ~/.intent/lead  (prints the public key)"
+    - id: em
+      name: "Engineering manager"
+      contact: "em@example.com"
+      pubkey: "REPLACE"
+
+model_routing:
+  # Which model runs which kind of work. The agent does not pick by feel: model_route.py
+  # classifies the task from this file and prints the model, the matched rule and the reason.
+  #
+  # SENSITIVITY AND DIFFICULTY ARE DIFFERENT AXES, and conflating them was a real defect here.
+  # Editing governance.yaml is sensitive, but the edit itself is trivial — it used to route to
+  # Fable because that was the only tier carrying requires_human_in_loop, so "needs a human" was
+  # buying "needs the strongest reasoning". Sensitive work now gets a HUMAN and a strong REVIEW
+  # (human_in_loop_for, stage_floor); it does not get the top model to type a two-line change.
+  #
+  # Fable is for DECIDING, never for doing. If the decision is already made and the task is to
+  # implement it, that is opus at most, however consequential the decision was.
+  enabled: true
+  announce: true                # print the activation line in the MAIN chat before forking the subagent
+  # MANDATORY, not advisory. The PreToolUse hook pretooluse_model_route.py blocks a subagent spawn
+  # until a decision has been RECORDED (model_route.py --record), and blocks a spawn that names a
+  # different model than the recorded one. Set false to go back to advisory routing, and know that
+  # an agent routing by feel then goes undetected.
+  mandatory: true
+  record_ttl_minutes: 30        # how long a recorded decision stays fresh for the hook
+  default: sonnet               # when nothing matches — never haiku, so a misclassification is not a cheap one
+  escalate_only: true           # a subagent may ask for a HIGHER tier mid-task; it may never take a lower one
+  size_ceiling: opus            # size alone never buys a stronger model than this; fable is reached by KIND only
+  log: docs/intent/governance/MODEL_ROUTING.log
+  # Work that REQUIRES A HUMAN, independent of which model does it. This is the list that used to
+  # be welded to the fable tier. A change of any of these kinds never auto-merges, whatever
+  # merge.auto_merge says, and no tier choice can waive it.
+  human_in_loop_for: [governance_change, security_findings, neg_claims, arch_contract_changes,
+                      irreversible_decision, escalation_handling, register_writes]
+  tiers:
+    haiku:
+      use_for: [cleanup, formatting, rename, import_sort, typo_fix, docs_touchup,
+                digest_refresh, log_triage, manifest_regen, mechanical_edit]
+      max_changed_lines: 40
+      max_files: 5
+      never_for: [neg_claims, security_findings, arch_contract_changes, escalation_handling,
+                  register_writes, governance_change]
+    sonnet:
+      use_for: [bug_fix, feature_implementation, test_authoring, spec_delta, lane_consolidation,
+                fix_ledger_work, trace_map_update, config_edit, governance_change]
+      max_changed_lines: 400
+      max_files: 25
+      never_for: [arch_contract_changes, hub_nodes]
+    opus:
+      use_for: [hard_implementation, architecture_change, high_impact_bug_fix, hub_nodes,
+                cross_service_refactor, concurrency_work, intent_review, conformance_review,
+                security_findings, security_critical, neg_claims, arch_contract_changes,
+                escalation_handling, irreversible_change]
+    fable:
+      # DECISIONS and open-ended thinking only. Every entry here is a choice being made, not a
+      # change being written. "Implement the decision we took" is opus, not fable.
+      use_for: [critical_architecture_decision, design_decision, spec_decision,
+                strategic_planning, hard_brainstorming, tradeoff_analysis,
+                irreversible_decision, security_architecture_decision, control_band_design]
+  # A governance stage never runs below its floor, however small the diff looks. Cost saving
+  # must not hollow out the gates: this is the block that stops "cheap intent review".
+  # Note governance_change sits at OPUS, not fable: the REVIEW of a rule change needs depth,
+  # the edit does not, and the human gate comes from human_in_loop_for above.
+  stage_floor:
+    "5_pr_review": sonnet
+    "8_intent_review": opus
+    "10_hitl_merge_gate": opus
+    "escalation": opus
+    "governance_change": opus
+
+init_decisions:
+  # What intent-init ASKED, and the answer it was given. Each is a question only a person can
+  # answer, so an EMPTY value means the question has not been asked yet — `intent_status.py`
+  # reports every one, and re-running intent-init asks it. (2.1 re-runs skipped the work-profile
+  # and notification questions because "governance.yaml already exists"; nothing recorded whether
+  # they had ever been asked.) Record the answer in words; the settings it implies live in their
+  # own sections below.
+  source_of_truth: "repo (Frank, 2026-10-06)"   # Step 3b   repo | legacy:<system> | linkage — per artifact, if they differ
+  merge_policy: "solo, no second approver; gate advisory; human merges (Frank, 2026-10-06)"      # Step 4e.1 e.g. "solo, no required approval" · "team, 1 approval + CI"
+  autonomy: "hitl (first install default; Frank, 2026-10-06)"          # Step 4e.1b hitl | hotl | hootl, and who asked for it
+  notices: "slack (chosen 2026-10-06; channel NOT yet armed: loop_notices.enabled=false until webhook proven)"           # Step 4e2b slack | teams | slack+teams | none-yet
+  work_profile: [greenfield]      # Step 4e3  e.g. [brownfield, refactoring] — work_profile.py --list
+
+# ONE place that says what needs a human, and ONE map of protected paths. Everything else is
+# derived from this block by policy.py — the unattended fences, the routing check, the autonomy
+# report. Before 2.0.0 the same decision lived in FIVE lists that drifted apart, and the merge gate
+# read only two of them: `human_in_loop_for` said a governance change "never auto-merges", and
+# nothing at merge time read it.
+risk:
+  # Work that needs a human. A class the gate can DETECT (by path, ledger, register, graph or
+  # history) is automatically an unattended-merge fence as well; one it cannot detect — a decision,
+  # not a diff — is reported as "declared, not checkable at merge", never assumed enforced.
+  # Removing a class from this list is the ONLY way to stop requiring a human for it.
+  human_required: [governance_change, register_writes, security_findings, neg_claims, arch_contract_changes, irreversible_change,
+                   cutover, destructive_data_operation, schema_migration, build_signing_change, escalation_handling, irreversible_decision]
+  # Fences on UNATTENDED merging that need no human by themselves. These two may be removed.
+  unattended_only: [first_pr_of_change, hub_nodes]
+  # RISK IS REACH, NOT SIZE. Each glob once, with every class it belongs to:
+  #   arch_contract — fences arch_contract_changes   irreversible — a revert cannot undo it
+  #   signing       — fences build_signing_change
+  # Executed under a valid hootl grant with the old documentation-only list: deleting 4,000 lines of
+  # dead code was INELIGIBLE on size, while a 3-line route change moving all production traffic, a
+  # feature-flag cut-over and a DROP COLUMN migration were ELIGIBLE. Trim to your real layout: an
+  # over-broad map costs unattended merges (the safe direction), a too-narrow one costs the fence.
+  # NOT here, by design: the loop's own policy, hooks, workflows and register are fenced by a
+  # built-in list no configuration can remove — anything configurable here would be configured by
+  # the very file an unattended PR is changing.
+  paths:
+    "docs/architecture/**":      [arch_contract]
+    "*.drawio":                  [arch_contract]
+    "openspec/specs/**":         [arch_contract]
+    "docs/adr/**":               [arch_contract]
+    "infra/**":                  [arch_contract, irreversible]
+    "deploy/**":                 [arch_contract]
+    "helm/**":                   [arch_contract]
+    "k8s/**":                    [arch_contract]
+    "terraform/**":              [arch_contract, irreversible]
+    "*.tf":                      [arch_contract, irreversible]
+    "*.tfvars":                  [arch_contract, irreversible]
+    "**/Dockerfile":             [arch_contract]
+    "docker-compose*.yml":       [arch_contract]
+    "**/nginx*.conf":            [arch_contract, irreversible]
+    "**/routes*":                [arch_contract, irreversible]
+    "**/ingress*":               [arch_contract, irreversible]
+    "config/flags*":             [arch_contract, irreversible]
+    "**/feature_flags*":         [arch_contract, irreversible]
+    "**/*.flags.yml":            [arch_contract, irreversible]
+    "**/migrations/**":          [arch_contract, irreversible]
+    "**/migrate/**":             [arch_contract, irreversible]
+    "**/*.ddl":                  [arch_contract, irreversible]
+    "db/**":                     [arch_contract]
+    "**/retention*":             [irreversible]
+    "**/backfill*":              [irreversible]
+    "**/*.entitlements":         [arch_contract, signing]
+    "**/*.plist":                [arch_contract]
+    "**/*.pbxproj":              [arch_contract, signing]
+    "**/*.mobileprovision":      [arch_contract, signing]
+    "fastlane/**":               [arch_contract, signing]
+    "**/keystore*":              [arch_contract, signing]
+
+# ---------------------------------------------------------------------------------------------------
+# WHO TO TELL WHEN THE LOOP IS WAITING ON A PERSON — Slack and/or Teams (intent_notify.py, run by
+# .github/workflows/intent-notify.yml after every gate and post-merge run, and every 15 minutes).
+#
+# Without this, a change that needs a person (an intent to accept, a NEEDS-USER question, a sign-off,
+# an escalation) simply sits in the queue. With it: one notice when the wait starts, a reminder every
+# remind_after_hours, ONE escalation to escalate_to at escalate_after_hours, nothing once it moves.
+# Each notice is sent exactly once, however many sweeps run (a create-only ref claims it first).
+# A failed delivery blocks nothing — it is retried, and a channel that keeps failing is reported to
+# the escalation contact on the other channels.
+#
+# SECRETS NEVER GO HERE. A command names the ENVIRONMENT VARIABLE holding the webhook URL or the bot
+# token; the value lives in the CI secret store. This file is committed and read by every fork.
+loop_notices:
+  enabled: true                 # Slack bot channel wired to INTENT_SLACK_BOT_TOKEN; delivery not yet proven
+  # Commands name the interpreter: an executable bit is lost by a commit from Windows or a zip
+  # extraction, and a notifier that cannot start is a notice that never arrives.
+  channels:
+    slack:                      # Slack app (bot token in CI secret INTENT_SLACK_BOT_TOKEN): message receipts
+      command: "python3 .claude/intent-hooks/chat_notifier.py --service slack --token-env INTENT_SLACK_BOT_TOKEN --channel #iqcouncil-loop"
+  default_channels: [slack]   # where a route without its own `channels` posts (default: all of them)
+  escalate_to: frank     # who hears when a wait outlives escalate_after_hours
+  digest_hour_utc: 8            # when a `mode: digest` route sends its one message of the day
+  max_attempts: 4               # per channel; then the notice is abandoned and that is reported
+  timeout_seconds: 20
+  link_template: ""             # e.g. "https://github.com/acme/app/pull/{pr}" — {change} and {pr}
+  routes:                       # `to`: decider · originator · codeowners · escalation_chain ·
+                                #       policy_owner · or a person id from `people`
+    intent_acceptance: {to: frank, remind_after_hours: 24, escalate_after_hours: 72, mode: digest}
+    needs_user:        {to: frank, remind_after_hours: 24, escalate_after_hours: 72}
+    human_review:      {to: frank, remind_after_hours: 8, escalate_after_hours: 24}
+    escalation:        {to: frank, remind_after_hours: 4, escalate_after_hours: 12}
+    assembly_pr:       {to: frank, remind_after_hours: 8, escalate_after_hours: 24}
+    stalled:           {to: frank, after_hours: 8, remind_after_hours: 24}
+    grant_expiring:    {to: frank, days_before: 7, remind_after_hours: 24}
+
+# People the notices can @-mention. Ids are referenced by `to`, the escalation chain and CODEOWNERS
+# (via `github`). `slack` is a member id (U…); `teams` is the user's sign-in address (UPN). A person
+# with neither is named in plain text. Read from the trust ref, like everything here: a branch
+# cannot redirect or silence the people asked to review it.
+people:
+  frank: {name: "Frank Bignone", slack: "U0B1T2QLP2L"}
+#   lead: {name: "Team lead", email: "lead@example.com", github: "lead-gh", slack: "U0123ABCD", teams: "lead@example.com"}

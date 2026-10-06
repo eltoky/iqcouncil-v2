@@ -1,0 +1,59 @@
+# .github/workflows/intent-notify.yml — tells a person, on Slack or Teams, when the loop waits on them.
+#
+# Runs the notification sweep (intent_notify.py) right after the acceptance gate and the post-merge
+# actor — so a sign-off request or an escalation is announced within moments — and every 15 minutes
+# as the safety net that catches stalls, reminders, escalations and anything a trigger missed.
+#
+# Trust: `schedule`, `workflow_run` and `workflow_dispatch` all run THIS file from the default
+# branch. The sweep reads policy, routes, channels and the people map from the trust ref only, and
+# runs the notifier commands from this trusted checkout. It needs `contents: write` for ONE thing:
+# pushing its claim refs (refs/intent/notices/*) — that is what makes each notice exactly-once
+# however many runs overlap. It pushes no branch.
+#
+# Secrets: create the ones your channels name (INTENT_SLACK_WEBHOOK, INTENT_TEAMS_WEBHOOK,
+# INTENT_SLACK_BOT_TOKEN). An unset secret is a failed delivery for that channel, retried and then
+# reported — never a silent success.
+name: intent-notify
+on:
+  workflow_run:
+    workflows: ["intent-acceptance", "intent-post-merge"]
+    types: [completed]
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+    inputs:
+      test_channel:
+        description: "Send a TEST notice through this channel (its name under loop_notices.channels) instead of sweeping"
+        required: false
+        default: ""
+permissions:
+  contents: write
+# One sweep at a time per repository. The claim refs already make overlapping sweeps safe; this keeps
+# a slow sweep (a dead channel times out per notice) from being raced by the next scheduled one.
+concurrency:
+  group: intent-notify
+  cancel-in-progress: false
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: "${{ github.event.repository.default_branch }}", fetch-depth: 0 }
+      - name: Fetch the loop's state, leases and notice claims
+        run: git fetch -q origin '+refs/intent/*:refs/intent/*' '+refs/intent-locks/*:refs/intent-locks/*' || true
+      - name: Notify whoever the loop is waiting on
+        env:
+          INTENT_TRUST_REF: refs/remotes/origin/${{ github.event.repository.default_branch }}
+          INTENT_SLACK_WEBHOOK: ${{ secrets.INTENT_SLACK_WEBHOOK }}
+          INTENT_TEAMS_WEBHOOK: ${{ secrets.INTENT_TEAMS_WEBHOOK }}
+          INTENT_SLACK_BOT_TOKEN: ${{ secrets.INTENT_SLACK_BOT_TOKEN }}
+          INTENT_AGENT_ID: intent-notify
+          # Passed as data, never spliced into the script: only a channel NAME is accepted.
+          TEST_CHANNEL: ${{ github.event.inputs.test_channel }}
+        run: |
+          if [ -n "$TEST_CHANNEL" ]; then
+            case "$TEST_CHANNEL" in *[!A-Za-z0-9_.-]*) echo "not a channel name: $TEST_CHANNEL"; exit 2;; esac
+            python3 .claude/intent-hooks/intent_notify.py test --channel "$TEST_CHANNEL"
+          else
+            python3 .claude/intent-hooks/intent_notify.py sweep
+          fi

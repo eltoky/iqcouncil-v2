@@ -1,0 +1,6 @@
+# Append to .gitattributes — generated intent artifacts must never cause merge conflicts.
+docs/intent/INTENT_TRACE.yaml      merge=ours linguist-generated=true
+docs/intent/graph/**               merge=ours linguist-generated=true
+docs/intent/folders/**             merge=ours linguist-generated=true
+docs/intent/INTENT_COMPLIANCE.md   merge=ours linguist-generated=true
+# Enable the 'ours' driver once per clone:  git config merge.ours.driver true

@@ -1,0 +1,353 @@
+# docs/intent/coverage.yaml — the coverage denominator.
+#
+# WHICH TOOL CLAIMS WHICH FILE. This file exists because five of the suite's measuring gates
+# measured one language and reported the omission as ZERO:
+#   * renaming a .py to .go took the security path from 236 functions to 214 — the project's own
+#     worst F(64) among them — and the complexity ratchet said "no function got worse"
+#   * a failing Go test and a failing Swift NEG tripwire both exited 0, and so did a manifest
+#     entry pointing at a file that did not exist
+#   * the folder digests printed "none detected mechanically" for a repo full of Kotlin and Swift
+# Every one is the suite's own first rule broken by the tooling that enforces it: omission is not
+# zero. A file class is either claimed by a named tool, or declared unmeasurable WITH a reason, or
+# it is a finding. "Silently skipped" is not one of the three.
+#
+# COMMIT THIS AND MERGE IT TO THE PROTECTED BRANCH. The gates read it from the pinned trust ref,
+# for the same reason they read governance.yaml from there: a branch that can declare its own
+# files unmeasurable can exempt itself from a gate.
+#
+# TRUST SPLIT. `languages` is data and the gates read it. `runners` are argv lists that get
+# EXECUTED, and only the test job reads those — the job that already runs the repository's own
+# test files. A command must be a LIST, never a string, so there is no shell to inject into, and
+# `{test}` is the only substitution. `intent_coverage.py --validate` enforces both.
+#
+# ADDING A LANGUAGE is a declaration, not a code change. `complexity`, `tests` and `graph` each
+# name the tool that claims that measurement, or `none` to declare it unmeasurable here — which is
+# an honest answer and produces a note. An ABSENT entry is a finding.
+
+version: 1
+languages:
+  python:
+    extensions:
+    - .py
+    complexity: radon
+    tests: pytest
+    graph: graphify
+  javascript:
+    extensions:
+    - .js
+    - .jsx
+    - .mjs
+    - .cjs
+    complexity: none
+    tests: jest
+    graph: graphify
+    note: "complexity: radon parses Python only — wire eslint complexity or a JS tool into CI and name it here"
+  typescript:
+    extensions:
+    - .ts
+    - .tsx
+    complexity: none
+    tests: vitest
+    graph: graphify
+    note: "complexity: radon parses Python only — wire eslint complexity or a TS tool into CI and name it here"
+  go:
+    extensions:
+    - .go
+    complexity: none
+    tests: gotest
+    graph: none
+    note: "complexity: gocyclo exists but is not wired in; graph: the code graph indexes Python symbols only"
+  rust:
+    extensions:
+    - .rs
+    complexity: none
+    tests: cargo
+    graph: none
+    note: "complexity: no tool wired in; graph: the code graph indexes Python symbols only"
+  java:
+    extensions:
+    - .java
+    complexity: none
+    tests: maven
+    graph: none
+    note: "complexity: no tool wired in (checkstyle/PMD would do it); graph: Python symbols only"
+  kotlin:
+    extensions:
+    - .kt
+    - .kts
+    complexity: none
+    tests: gradle
+    graph: none
+    note: "complexity: detekt would do it, not wired in; graph: the code graph indexes Python symbols only"
+  swift:
+    extensions:
+    - .swift
+    complexity: none
+    tests: swiftpm
+    graph: none
+    note: "complexity: no tool wired in; graph: the code graph indexes Python symbols only"
+  objc:
+    extensions:
+    - .m
+    - .mm
+    - .h
+    complexity: none
+    tests: xcodebuild
+    graph: none
+    note: "complexity: no tool wired in; graph: the code graph indexes Python symbols only"
+  csharp:
+    extensions:
+    - .cs
+    complexity: none
+    tests: dotnet
+    graph: none
+    note: "complexity: no tool wired in; graph: the code graph indexes Python symbols only"
+  ruby:
+    extensions:
+    - .rb
+    complexity: none
+    tests: rspec
+    graph: none
+    note: "complexity: flog would do it, not wired in; graph: the code graph indexes Python symbols only"
+  php:
+    extensions:
+    - .php
+    complexity: none
+    tests: phpunit
+    graph: none
+    note: "complexity: phpmd would do it, not wired in; graph: the code graph indexes Python symbols only"
+  scala:
+    extensions:
+    - .scala
+    - .sc
+    complexity: none
+    tests: sbt
+    graph: none
+    note: "complexity: no tool wired in; graph: the code graph indexes Python symbols only"
+  dart:
+    extensions:
+    - .dart
+    complexity: none
+    tests: flutter
+    graph: none
+    note: "complexity: no tool wired in; graph: the code graph indexes Python symbols only"
+  sql:
+    extensions:
+    - .sql
+    complexity: none
+    tests: dbt
+    graph: none
+    note: "complexity: not a function-structured language, so a per-function ceiling does not apply; graph: lineage is unmodelled (FIX_LEDGER F-022) and is the real blast radius here"
+  r:
+    extensions:
+    - .R
+    - .r
+    - .Rmd
+    complexity: none
+    tests: testthat
+    graph: none
+    note: "complexity: cyclocomp would do it, not wired in; graph: the code graph indexes Python symbols only"
+  notebook:
+    extensions:
+    - .ipynb
+    complexity: none
+    tests: nbval
+    graph: none
+    note: "complexity: a notebook is re-serialised JSON, so per-function measurement is meaningless until it is extracted to a module; graph: Python symbols only"
+  legacy_etl:
+    extensions:
+    - .sas
+    - .dtsx
+    - .ktr
+    - .kjb
+    - .xml.map
+    complexity: none
+    tests: none
+    graph: none
+    note: "migration source \u2014 no runner exists; parity is proved by a DIFFERENTIAL test against it,\
+      \ not by running it"
+  shell:
+    extensions:
+    - .sh
+    - .bash
+    - .zsh
+    complexity: none
+    tests: bats
+    graph: none
+    note: "complexity: no cyclomatic tool for shell is wired in; graph: shell is not indexed"
+  infra:
+    extensions:
+    - .tf
+    - .tfvars
+    - .hcl
+    complexity: none
+    tests: terraform
+    graph: none
+    note: "complexity: declarative, so a per-function ceiling does not apply; graph: resource graphs are terraform's own, not this one's"
+  platform:
+    extensions:
+    - .plist
+    - .entitlements
+    - .pbxproj
+    - .xcconfig
+    - .storyboard
+    - .xib
+    - .gradle
+    - .csproj
+    - .podspec
+    complexity: none
+    tests: none
+    graph: none
+    note: "platform and build artifacts \u2014 no runner; fence them with risk.paths (arch_contract)\
+      \ instead"
+  config:
+    extensions:
+    - .yml
+    - .yaml
+    - .json
+    - .toml
+    - .ini
+    - .cfg
+    - .properties
+    - .env.example
+    complexity: none
+    tests: none
+    graph: none
+    note: "data, not code: there is nothing to measure, test or index. It is declared so that a config-only change still registers as a MEASURED change rather than an unclaimed one"
+  docs:
+    extensions:
+    - .md
+    - .rst
+    - .txt
+    - .adoc
+    - .drawio
+    - .svg
+    - .png
+    - .jpg
+    - .pdf
+    - .csv
+    complexity: none
+    tests: none
+    graph: none
+    note: "prose and binary assets: nothing to measure, test or index. Declared so that a docs-only change registers as a MEASURED change rather than an unclaimed one"
+runners:
+  pytest:
+    command:
+    - pytest
+    - '{test}'
+    - -q
+    - --no-header
+  jest:
+    command:
+    - npx
+    - jest
+    - '{test}'
+  vitest:
+    command:
+    - npx
+    - vitest
+    - run
+    - '{test}'
+  playwright:
+    command:
+    - npx
+    - playwright
+    - test
+    - '{test}'
+  k6:
+    command:
+    - k6
+    - run
+    - --quiet
+    - '{test}'
+  gotest:
+    command:
+    - go
+    - test
+    - -run
+    - .
+    - '{test}'
+  cargo:
+    command:
+    - cargo
+    - test
+  maven:
+    command:
+    - mvn
+    - -q
+    - -Dtest={test}
+    - test
+  gradle:
+    command:
+    - ./gradlew
+    - test
+    - --tests
+    - '{test}'
+  swiftpm:
+    command:
+    - swift
+    - test
+    - --filter
+    - '{test}'
+  xcodebuild:
+    command:
+    - xcodebuild
+    - test
+    - -scheme
+    - '{test}'
+  dotnet:
+    command:
+    - dotnet
+    - test
+    - --filter
+    - '{test}'
+  rspec:
+    command:
+    - bundle
+    - exec
+    - rspec
+    - '{test}'
+  phpunit:
+    command:
+    - vendor/bin/phpunit
+    - '{test}'
+  sbt:
+    command:
+    - sbt
+    - testOnly {test}
+  flutter:
+    command:
+    - flutter
+    - test
+    - '{test}'
+  dbt:
+    command:
+    - dbt
+    - test
+    - --select
+    - '{test}'
+  testthat:
+    command:
+    - Rscript
+    - -e
+    - testthat::test_file('{test}')
+  nbval:
+    command:
+    - pytest
+    - --nbval-lax
+    - '{test}'
+  bats:
+    command:
+    - bats
+    - '{test}'
+  terraform:
+    command:
+    - terraform
+    - test
+    - -filter={test}
+  differential:
+    command:
+    - pytest
+    - '{test}'
+    - -q
+    - --no-header
