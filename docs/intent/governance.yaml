@@ -303,31 +303,28 @@ loop_notices:
   # Commands name the interpreter: an executable bit is lost by a commit from Windows or a zip
   # extraction, and a notifier that cannot start is a notice that never arrives.
   channels:
-    slack:                      # Slack incoming webhook (one channel per webhook)
-      command: "python3 .claude/intent-hooks/chat_notifier.py --service slack --url-env INTENT_SLACK_WEBHOOK"
-    # slack-bot:                # Slack app: real receipts (message ts) and DMs to a user id
-    #   command: "python3 .claude/intent-hooks/chat_notifier.py --service slack --token-env INTENT_SLACK_BOT_TOKEN --channel C0123ABCD"
-    teams:                      # Teams: a Workflows webhook ("When a Teams webhook request is received").
-      command: "python3 .claude/intent-hooks/chat_notifier.py --service teams --url-env INTENT_TEAMS_WEBHOOK"
-  # default_channels: [slack]   # where a route without its own `channels` posts (default: all of them)
-  escalate_to: policy_owner     # who hears when a wait outlives escalate_after_hours
+    slack:                      # Slack app (bot token in CI secret INTENT_SLACK_BOT_TOKEN): message receipts
+      command: "python3 .claude/intent-hooks/chat_notifier.py --service slack --token-env INTENT_SLACK_BOT_TOKEN --channel #iqcouncil-loop"
+  default_channels: [slack]   # where a route without its own `channels` posts (default: all of them)
+  escalate_to: frank     # who hears when a wait outlives escalate_after_hours
   digest_hour_utc: 8            # when a `mode: digest` route sends its one message of the day
   max_attempts: 4               # per channel; then the notice is abandoned and that is reported
   timeout_seconds: 20
   link_template: ""             # e.g. "https://github.com/acme/app/pull/{pr}" — {change} and {pr}
   routes:                       # `to`: decider · originator · codeowners · escalation_chain ·
                                 #       policy_owner · or a person id from `people`
-    intent_acceptance: {to: decider, remind_after_hours: 24, escalate_after_hours: 72, mode: digest}
-    needs_user:        {to: originator, remind_after_hours: 24, escalate_after_hours: 72}
-    human_review:      {to: codeowners, remind_after_hours: 8, escalate_after_hours: 24}
-    escalation:        {to: escalation_chain, remind_after_hours: 4, escalate_after_hours: 12}
-    assembly_pr:       {to: policy_owner, remind_after_hours: 8, escalate_after_hours: 24}
-    stalled:           {to: policy_owner, after_hours: 8, remind_after_hours: 24}
-    grant_expiring:    {to: policy_owner, days_before: 7, remind_after_hours: 24}
+    intent_acceptance: {to: frank, remind_after_hours: 24, escalate_after_hours: 72, mode: digest}
+    needs_user:        {to: frank, remind_after_hours: 24, escalate_after_hours: 72}
+    human_review:      {to: frank, remind_after_hours: 8, escalate_after_hours: 24}
+    escalation:        {to: frank, remind_after_hours: 4, escalate_after_hours: 12}
+    assembly_pr:       {to: frank, remind_after_hours: 8, escalate_after_hours: 24}
+    stalled:           {to: frank, after_hours: 8, remind_after_hours: 24}
+    grant_expiring:    {to: frank, days_before: 7, remind_after_hours: 24}
 
 # People the notices can @-mention. Ids are referenced by `to`, the escalation chain and CODEOWNERS
 # (via `github`). `slack` is a member id (U…); `teams` is the user's sign-in address (UPN). A person
 # with neither is named in plain text. Read from the trust ref, like everything here: a branch
 # cannot redirect or silence the people asked to review it.
-people: {}
+people:
+  frank: {name: "Frank Bignone", slack: "U0B1T2QLP2L"}
 #   lead: {name: "Team lead", email: "lead@example.com", github: "lead-gh", slack: "U0123ABCD", teams: "lead@example.com"}
